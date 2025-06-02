@@ -1,4 +1,7 @@
-use bevy::prelude::*;
+use bevy::{
+    math::bounding::{Aabb2d, BoundingCircle, IntersectsVolume},
+    prelude::*, utils::HashSet,
+};
 use rand::Rng;
 
 const SCOREBOARD_FONT_SIZE: f32 = 40.0;
@@ -6,6 +9,30 @@ const SCOREBOARD_TEXT_PADDING: Val = Val::Px(5.0);
 
 const TEXT_COLOR: Color = Color::srgb(0.98, 0.561, 0.329);
 const SCORE_COLOR: Color = Color::srgb(0.98, 0.722, 0.11);
+
+const BIRD_SIZE: (f32, f32) = (558.0, 447.0);
+const PIPE_SIZE: (f32, f32) = (292.0, 855.0);
+
+const BIRD_PIPE_COLLISION_OFFSET: (f32, f32) = (120.0, 60.0);
+
+fn main() {
+    App::new()
+        .add_plugins(DefaultPlugins)
+        .insert_resource(Score(0))
+        .insert_resource(GameState {
+            did_start: false,
+            did_end: false,
+        })
+        .insert_resource(PipesPassedThrough(HashSet::new()))
+        .add_event::<CollisionEvent>()
+        .add_systems(Startup, setup)
+        .add_systems(Startup, (load_images, spawn_background, spawn_bird).chain())
+        .add_systems(Update, spawn_pipes)
+        .add_systems(Update, update_scoreboard)
+        .add_systems(Update, (bird_flap, bird_mechanics, pipe_mechanics))
+        .add_systems(Update, check_for_collisions)
+        .run();
+}
 
 #[derive(Resource)]
 struct GameState {
@@ -22,19 +49,88 @@ struct ScoreBoardUi;
 #[derive(Component)]
 struct PipesSpawnTimer(Timer);
 
+#[derive(Resource, Deref, DerefMut)]
+struct PipesPassedThrough(HashSet<Entity>);
+
 fn update_scoreboard(score: Res<Score>, mut query: Query<&mut Text, With<ScoreBoardUi>>) {
     let mut text = query.single_mut();
-    text.sections[1].value = score.to_string();
+    text.sections[1].value = (**score / 2).to_string();
 }
 
+fn check_for_collisions(
+    mut commands: Commands,
+    mut game_state: ResMut<GameState>,
+    mut score: ResMut<Score>,
+    mut pipes_passed_through: ResMut<PipesPassedThrough>,
+    mut bird_query: Query<(&mut BirdTranslate, &Transform)>,
+    collider_query: Query<(Entity, &Transform, Option<&PipesTranslate>), With<Collider>>,
+    mut collision_events: EventWriter<CollisionEvent>,
+) {
+    if !game_state.did_start || game_state.did_end {
+        return;
+    }
+
+    let (mut _bird_velocity, bird_transform) = bird_query.single_mut();
+
+    for (collider_entity, collider_transform, pipes_translate) in &collider_query {
+        if pipes_translate.is_some() {
+            let bird_scale = bird_transform.scale.truncate();
+
+            let bird_size_x = BIRD_SIZE.0 * bird_scale.x;
+            let bird_size_y = BIRD_SIZE.1 * bird_scale.y;
+            let bird_diameter = ((bird_size_x * bird_size_x) + (bird_size_y * bird_size_y)).sqrt();
+
+            let pipe_scale = collider_transform.scale.truncate();
+
+            let pipe_size_x = PIPE_SIZE.0 * pipe_scale.x - BIRD_PIPE_COLLISION_OFFSET.0;
+            let pipe_size_y = PIPE_SIZE.1 * pipe_scale.y - BIRD_PIPE_COLLISION_OFFSET.1;
+
+            if bird_collision(
+                BoundingCircle::new(bird_transform.translation.truncate(), bird_diameter / 2.0),
+                Aabb2d::new(
+                    collider_transform.translation.truncate(),
+                    Vec2::new(pipe_size_x, pipe_size_y) / 2.0,
+                ),
+            ) {
+                game_state.did_end = true;
+            } else {
+                if bird_transform.translation.x - bird_diameter / 2.0 > collider_transform.translation.x {
+                    if !pipes_passed_through.contains(&collider_entity) {
+                        **score += 1;
+                        pipes_passed_through.insert(collider_entity);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn bird_collision(bird: BoundingCircle, bounding_box: Aabb2d) -> bool {
+    return if bird.intersects(&bounding_box) {
+        true
+    } else {
+        false
+    };
+}
+
+
+#[derive(Component)]
+struct Collider;
+
+#[derive(Event, Default)]
+struct CollisionEvent;
+
 fn setup(mut commands: Commands) {
+    // Camera
     commands.spawn(Camera2dBundle::default());
 
+    // PipesSpawn Timer
     commands.spawn(PipesSpawnTimer(Timer::from_seconds(
         1.0,
         TimerMode::Repeating,
     )));
 
+    // Scoreboard UI
     commands.spawn((
         ScoreBoardUi,
         TextBundle::from_sections([
@@ -115,6 +211,10 @@ fn spawn_pipes(
     time: Res<Time>,
     mut query_timer: Query<&mut PipesSpawnTimer>,
 ) {
+    if !game_state.did_start || game_state.did_end {
+        return;
+    }
+
     let window = query_window.single();
     let (width, height) = (window.width(), window.height());
 
@@ -137,6 +237,7 @@ fn spawn_pipes(
                 },
                 ..default()
             },
+            Collider,
         ));
 
         commands.spawn((
@@ -154,6 +255,7 @@ fn spawn_pipes(
                 },
                 ..default()
             },
+            Collider,
         ));
     }
 }
@@ -163,7 +265,7 @@ struct BirdTranslate {
     velocity: f32,
 }
 
-#[derive(Component)]
+#[derive(Component, Debug)]
 struct PipesTranslate {
     velocity: f32,
 }
@@ -186,7 +288,7 @@ fn bird_mechanics(
     query_window: Query<&Window>,
     mut query: Query<(&mut BirdTranslate, &mut Transform)>,
 ) {
-    if !game_state.did_start {
+    if !game_state.did_start || game_state.did_end {
         return;
     }
 
@@ -210,7 +312,7 @@ fn pipe_mechanics(
     game_state: ResMut<GameState>,
     mut query: Query<(&mut PipesTranslate, &mut Transform)>,
 ) {
-    if !game_state.did_start {
+    if !game_state.did_start || game_state.did_end {
         return;
     }
 
@@ -218,20 +320,4 @@ fn pipe_mechanics(
     for (pipes, mut transform) in query.iter_mut() {
         transform.translation.x += (pipes.velocity - 200.0) * t;
     }
-}
-
-fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins)
-        .insert_resource(Score(0))
-        .insert_resource(GameState {
-            did_start: false,
-            did_end: false,
-        })
-        .add_systems(Startup, setup)
-        .add_systems(Startup, (load_images, spawn_background, spawn_bird).chain())
-        .add_systems(Update, spawn_pipes)
-        .add_systems(Update, update_scoreboard)
-        .add_systems(Update, (bird_flap, bird_mechanics, pipe_mechanics))
-        .run();
 }
