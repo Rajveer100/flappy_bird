@@ -1,6 +1,9 @@
 use bevy::{
     math::bounding::{Aabb2d, BoundingCircle, IntersectsVolume},
-    prelude::*, utils::HashSet,
+    prelude::*,
+    text::TextSpanComponent,
+    utils::HashSet,
+    winit::WinitSettings,
 };
 use rand::Rng;
 
@@ -15,10 +18,30 @@ const PIPE_SIZE: (f32, f32) = (292.0, 855.0);
 
 const BIRD_PIPE_COLLISION_OFFSET: (f32, f32) = (120.0, 60.0);
 
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn main_rs() {
+    main();
+}
+
 fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins)
-        .insert_resource(Score(0))
+    let mut app = App::new();
+
+    #[cfg(target_os = "ios")]
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            resizable: false,
+            mode: bevy::window::WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
+            ..default()
+        }),
+        ..default()
+    }))
+    .insert_resource(WinitSettings::mobile());
+
+    #[cfg(not(target_os = "ios"))]
+    app.add_plugins(DefaultPlugins);
+
+    app.insert_resource(Score(0))
         .insert_resource(GameState {
             did_start: false,
             did_end: false,
@@ -47,14 +70,24 @@ struct Score(u32);
 struct ScoreBoardUi;
 
 #[derive(Component)]
+struct ScoreValueText;
+
+#[derive(Component)]
 struct PipesSpawnTimer(Timer);
 
 #[derive(Resource, Deref, DerefMut)]
 struct PipesPassedThrough(HashSet<Entity>);
 
-fn update_scoreboard(score: Res<Score>, mut query: Query<&mut Text, With<ScoreBoardUi>>) {
-    let mut text = query.single_mut();
-    text.sections[1].value = (**score / 2).to_string();
+fn update_scoreboard(
+    score: Res<Score>,
+    query: Query<&Children, With<ScoreBoardUi>>,
+    mut writer: TextUiWriter,
+) {
+    if let Ok(children) = query.get_single() {
+        if children.len() > 2 {
+            *writer.text(children[2], 0) = (**score / 2).to_string();
+        }
+    }
 }
 
 fn check_for_collisions(
@@ -94,7 +127,9 @@ fn check_for_collisions(
             ) {
                 game_state.did_end = true;
             } else {
-                if bird_transform.translation.x - bird_diameter / 2.0 > collider_transform.translation.x {
+                if bird_transform.translation.x - bird_diameter / 2.0
+                    > collider_transform.translation.x
+                {
                     if !pipes_passed_through.contains(&collider_entity) {
                         **score += 1;
                         pipes_passed_through.insert(collider_entity);
@@ -113,7 +148,6 @@ fn bird_collision(bird: BoundingCircle, bounding_box: Aabb2d) -> bool {
     };
 }
 
-
 #[derive(Component)]
 struct Collider;
 
@@ -131,30 +165,36 @@ fn setup(mut commands: Commands) {
     )));
 
     // Scoreboard UI
-    commands.spawn((
-        ScoreBoardUi,
-        TextBundle::from_sections([
-            TextSection::new(
-                "Score: ",
-                TextStyle {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: SCOREBOARD_TEXT_PADDING,
+                left: SCOREBOARD_TEXT_PADDING,
+                ..default()
+            },
+            ScoreBoardUi,
+        ))
+        .with_children(|parent| {
+            parent.spawn(ScoreBoardUi);
+            parent.spawn((
+                Text::new("Score: "),
+                TextFont {
                     font_size: SCOREBOARD_FONT_SIZE,
-                    color: TEXT_COLOR,
                     ..default()
                 },
-            ),
-            TextSection::from_style(TextStyle {
-                font_size: SCOREBOARD_FONT_SIZE,
-                color: SCORE_COLOR,
-                ..default()
-            }),
-        ])
-        .with_style(Style {
-            position_type: PositionType::Absolute,
-            top: SCOREBOARD_TEXT_PADDING,
-            left: SCOREBOARD_TEXT_PADDING,
-            ..default()
-        }),
-    ));
+                TextColor(TEXT_COLOR),
+            ));
+            parent.spawn((
+                Text::new("0"),
+                TextFont {
+                    font_size: SCOREBOARD_FONT_SIZE,
+                    ..default()
+                },
+                TextColor(SCORE_COLOR),
+                ScoreValueText
+            ));
+        });
 }
 
 #[derive(Resource)]
@@ -178,7 +218,7 @@ fn load_images(mut commands: Commands, server: Res<AssetServer>) {
 
 fn spawn_background(mut commands: Commands, background: Res<Background>) {
     commands.spawn(SpriteBundle {
-        texture: background.0.clone(),
+        sprite: background.0.clone().into(),
         transform: Transform {
             translation: Vec3::new(0.0, 0.0, 0.0),
             scale: Vec3::new(1.0, 1.0, 1.0),
@@ -192,7 +232,7 @@ fn spawn_bird(mut commands: Commands, bird: Res<Bird>) {
     commands.spawn((
         BirdTranslate { velocity: 0.0 },
         SpriteBundle {
-            texture: bird.0.clone(),
+            sprite: bird.0.clone().into(),
             transform: Transform {
                 translation: Vec3::new(-200.0, 0.0, 0.1),
                 scale: Vec3::new(0.2, 0.2, 0.0),
@@ -225,7 +265,7 @@ fn spawn_pipes(
         commands.spawn((
             PipesTranslate { velocity: 0.0 },
             SpriteBundle {
-                texture: pipes.0.clone(),
+                sprite: pipes.0.clone().into(),
                 transform: Transform {
                     translation: Vec3::new(
                         width / 2.0,
@@ -243,7 +283,7 @@ fn spawn_pipes(
         commands.spawn((
             PipesTranslate { velocity: 0.0 },
             SpriteBundle {
-                texture: pipes.0.clone(),
+                sprite: pipes.0.clone().into(),
                 transform: Transform {
                     translation: Vec3::new(
                         width / 2.0,
@@ -295,7 +335,7 @@ fn bird_mechanics(
     let window = query_window.single();
     let (mut bird, mut transform) = query.single_mut();
 
-    let t = time.delta_seconds();
+    let t = time.delta_secs();
     let delta_dist = bird.velocity * t;
 
     if transform.translation.y + delta_dist < -window.height() / 2.0 {
@@ -316,7 +356,7 @@ fn pipe_mechanics(
         return;
     }
 
-    let t = time.delta_seconds();
+    let t = time.delta_secs();
     for (pipes, mut transform) in query.iter_mut() {
         transform.translation.x += (pipes.velocity - 200.0) * t;
     }

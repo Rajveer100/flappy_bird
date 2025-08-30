@@ -1,10 +1,15 @@
+[lib]
+name = "flappy_bird"
+crate_type = ["staticlib"]
+path = "src/main.rs"
+
 [package]
 name = "flappy_bird"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bevy = "0.14.2"
+bevy = "0.15.0"
 rand = "0.8.5"
 
 [profile.dev]
